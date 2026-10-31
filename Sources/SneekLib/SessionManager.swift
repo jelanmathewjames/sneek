@@ -141,14 +141,31 @@ public actor SessionManager {
     var trackedPoolCount: Int { pools.count }
     var trackedIdleTimeoutCount: Int { pools.values.filter { $0.idleTimer != nil }.count }
 
+    // Case-insensitive match with word boundaries applied only where the
+    // pattern edge is a word character: "UPDATE" won't match "updatedAt",
+    // but punctuation-edged patterns like ".drop(" keep plain substring
+    // behavior (a boundary assertion next to punctuation would never match
+    // mid-identifier calls like "db.users.drop()").
+    static func matchesBlockedPattern(input: String, pattern: String) -> Bool {
+        guard let first = pattern.unicodeScalars.first, let last = pattern.unicodeScalars.last else {
+            return false
+        }
+        func isWordChar(_ scalar: Unicode.Scalar) -> Bool {
+            CharacterSet.alphanumerics.contains(scalar) || scalar == "_"
+        }
+        var regex = NSRegularExpression.escapedPattern(for: pattern)
+        if isWordChar(first) { regex = #"(?<![\w])"# + regex }
+        if isWordChar(last) { regex += #"(?![\w])"# }
+        return input.range(of: regex, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     // MARK: - Session mode
 
     public func send(input: String, to name: String, config: CommandConfig, resolvedCommand: String,
                      launch: LaunchContext = .inherit) async throws -> String {
         if config.readonly == true, let patterns = config.blockedPatterns {
-            let upper = input.uppercased()
             for pattern in patterns {
-                if upper.contains(pattern.uppercased()) {
+                if Self.matchesBlockedPattern(input: input, pattern: pattern) {
                     SneekLogger.warn("session/\(name): blocked input matching pattern '\(pattern)'")
                     throw SessionError.blockedByReadonly(pattern: pattern, input: input)
                 }
@@ -624,8 +641,16 @@ public actor SessionManager {
     /// (the kill goes to the child's process group, so a grandchild holding that pipe open goes
     /// with it), and its late resume is a no-op (`ResumeOnce`). When the reply wins the race the
     /// clock is disarmed, so nothing stays queued for the remainder of the timeout.
+    /// True when the sentinel command prints nothing but the marker: `echo`, psql's `\echo`,
+    /// redis's `ECHO`, mongosh's `print(`.
+    static func printsBareMarker(_ sentinel: String) -> Bool {
+        let s = sentinel.trimmingCharacters(in: .whitespaces).lowercased()
+        return s.hasPrefix("echo ") || s.hasPrefix("\\echo ") || s.hasPrefix("print(")
+    }
+
     private func exchange(_ payload: String, on session: LiveSession, marker: String, timeout: Int?) async throws -> String {
         let stdin = session.stdin, handle = session.stdout, data = Data(payload.utf8)
+        let bareMarker = Self.printsBareMarker(session.sentinel)
         return try await withCheckedThrowingContinuation { continuation in
             let once = ResumeOnce(continuation)
             // Cancellable, and cancelled on every exit path below: an answered call must not
@@ -655,11 +680,16 @@ public actor SessionManager {
                     // forever if the dropped chunk contained the sentinel).
                     let text = String(decoding: accumulated, as: UTF8.self)
 
-                    // Check if the marker appeared
+                    // Cut at the FIRST marker line: the marker command runs after the user's input, so
+                    // everything from its first occurrence on belongs to the marker. Only a sentinel
+                    // that prints the bare marker (echo, \echo, print) can share its line with output
+                    // that had no trailing newline, so only then is the text before it kept. Any other
+                    // sentinel (cqlsh's SELECT prints a table whose column header holds the marker)
+                    // loses the whole line: its prefix is sentinel decoration, not output.
                     let lines = text.components(separatedBy: "\n")
-                    if let idx = lines.lastIndex(where: { $0.contains(marker) }),
+                    if let idx = lines.firstIndex(where: { $0.contains(marker) }),
                        let markerRange = lines[idx].range(of: marker) {
-                        let partial = String(lines[idx][..<markerRange.lowerBound])
+                        let partial = bareMarker ? String(lines[idx][..<markerRange.lowerBound]) : ""
                         let output = (lines[..<idx] + [partial]).joined(separator: "\n")
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         clock?.disarm()

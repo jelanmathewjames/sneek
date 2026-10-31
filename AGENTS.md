@@ -44,7 +44,7 @@ Sources/
     ConfigStore.swift        # JSON config loading/saving from ~/.config/sneek/
     SecretResolver.swift     # SecretProvider protocol + Keychain/1Password/Bitwarden/Env
     TemplateEngine.swift     # {{variable}} interpolation
-    TunnelManager.swift      # SSH tunnel spawn/health check/teardown (actor)
+    TunnelManager.swift      # SSH + kubectl port-forward tunnel spawn/health check/teardown (actor)
     SessionManager.swift     # Persistent subprocess sessions with sentinel parsing (actor)
     IPCProtocol.swift        # Unix domain socket IPC client/server
     MCPServer.swift          # stdio JSON-RPC MCP server for Claude Code
@@ -59,7 +59,7 @@ Sources/
     MenuBarView.swift        # Menubar popover (search, command list, badges)
     CommandEditorView.swift  # Full command editor form
 Tests/
-  SneekLibTests/             # 434 checks on macOS, 424 on Linux
+  SneekLibTests/             # 470 checks on Linux; also run on macOS
     TestRunner.swift         # Custom test harness (no XCTest — see note below)
     Main.swift               # Test entry point
     ModelsTests.swift        # JSON round-trip, all secret providers, edge cases
@@ -394,7 +394,8 @@ per database in the deployment notes.
   meta-commands `SOURCE`, `COPY`, `CAPTURE` and `LOGIN` do **client-side file I/O** as the
   daemon's uid (`SOURCE '/run/secrets/x'` reads a secret; `CAPTURE` writes a file), so
   `cass-prod.json` lists them in `blocked_patterns`. Like every blocked pattern they are
-  substring-matched, case-insensitively: a column called `login_count` is refused too.
+  matched case-insensitively on word boundaries: `LOGIN` is refused, a column called
+  `login_count` is not.
 
 ### Tests
 
@@ -478,13 +479,17 @@ Default sentinels per known type:
 - Postgres: `\echo __SNEEK_DONE__`
 - MySQL: `SELECT '__SNEEK_DONE__';`
 - Redis: `ECHO __SNEEK_DONE__`
+- Cassandra (cqlsh): `SELECT (text)'__SNEEK_DONE__' FROM system.local;`
+- MongoDB (mongosh): `print("__SNEEK_DONE__")`
 - Generic/bash: `echo __SNEEK_DONE__`
 
 Custom sentinel via the `sentinel` field in command config.
 
+**Sentinel selection rule (for new DB types):** output parsing cuts at the *first* line containing `__SNEEK_DONE__` and discards everything from there on. So the sentinel's very first line of output must contain the marker. Prefer an echo-style command with no table formatting (`\echo`, `print`, `ECHO`). If the tool only has SELECT, use a bare `SELECT '__SNEEK_DONE__'` **without a column alias** — the marker then lands in the printed column header, which is the first line of the result block (this is why the cqlsh default works). An aliased column (`AS done`) or a decorative border printed above the header would leak those pre-marker lines into command output.
+
 ### Read-only mode — two layers
 1. **Setup commands** — run at session start (e.g., `SET default_transaction_read_only = on;`). The database itself enforces read-only.
-2. **Blocked patterns** — daemon rejects input containing patterns (DROP, DELETE, etc.) *before* it reaches the session. Case-insensitive. Safety net, not a guarantee.
+2. **Blocked patterns** — daemon rejects input matching patterns (DROP, DELETE, etc.) *before* it reaches the session. Case-insensitive. Word boundaries apply only where a pattern edge is a word character: `UPDATE` blocks `update flows …` but not `updatedAt`/`updated_at`; punctuation-edged patterns like `.drop(` keep plain substring matching (so `db.users.drop()` is still caught). Safety net, not a guarantee.
 
 ### One MCP server for all commands
 `sneekd mcp-serve` is a single stdio JSON-RPC process. Claude's config points to it once. All MCP-enabled commands appear as tools. Per-project scoping via `--tags` or `--commands` flags.
@@ -507,7 +512,7 @@ AppState is a **snapshot cache**, not live state: `loadConfig()` runs only on ap
 - Persistent sessions with sentinel-based output parsing
 - Setup commands at session start
 - Read-only enforcement (blocked patterns + setup commands)
-- SSH tunnel spawn, health check (TCP connect), teardown
+- Tunnel spawn (SSH or kubectl port-forward), health check (TCP connect), teardown
 - MCP stdio server (initialize, tools/list, tools/call)
 - Per-project MCP scoping (tags, command names)
 - Shell script generation with correct permissions
@@ -521,8 +526,8 @@ See [`TODO.md`](TODO.md).
 
 ## Testing
 
-434 checks, 0 failures on macOS (`swift run SneekTests`); 424 on Linux
-(`scripts/linux/test.sh`); 47 end-to-end checks (`Tests/e2e/run.sh`). See
+470 checks, 0 failures on Linux (`scripts/linux/test.sh`); the same suite runs on macOS
+with `swift run SneekTests`. 48 end-to-end checks (`Tests/e2e/run.sh`). See
 *Server mode (Linux) → Tests* for what each suite covers.
 
 **Unit tests** (no external dependencies):
@@ -617,6 +622,24 @@ Each MCP-enabled command becomes a tool named `sneek_<tool_name>` with a single 
   }
 }
 ```
+
+### Tunnel types
+
+`tunnel.type` selects the forwarding mechanism: `"ssh"` (the default when absent — all pre-existing configs are ssh) or `"kubectl"`. A kubectl tunnel runs `kubectl port-forward` instead of ssh and uses its own fields:
+
+```json
+"tunnel": {
+  "type": "kubectl",
+  "context": "zoko-development",
+  "namespace": "dev-services",
+  "resource": "svc/mongodb",
+  "local_port": 27018,
+  "remote_port": 27017,
+  "auto_connect": false
+}
+```
+
+`resource` (`svc/…`, `pod/…`, `deploy/…`) is required; `context` and `namespace` are optional (blank = kubectl's current context / default namespace). `host`, `user`, `identity_key`, and `remote_host` apply only to ssh tunnels. Health checks, the 10s monitor loop, backoff reconnect, and session reaping on reconnect are shared across both types. The daemon locates kubectl by searching `/opt/homebrew/bin`, `/usr/local/bin`, `~/.orbstack/bin`, then `PATH` — the launchd PATH doesn't include OrbStack's bin, hence the explicit search.
 
 ## Concurrency Model
 

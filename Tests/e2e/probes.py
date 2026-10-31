@@ -119,9 +119,11 @@ def guards():
           "SNEEK_SECRET_OWN=[sneek: redacted secret]" in env and "canary-envdump-own" not in env, env)
     check("scrubbed env: another command's secret is NOT in the client's environment",
           "PG_RO_PASSWORD" not in env and "PG_APP_PASSWORD" not in env and "app_pw" not in env, env)
-    # Blocked patterns are substring matches: a harmless query naming updated_at is still refused by the substring match
+    # Blocked patterns match on word boundaries: a column named updated_at passes, the UPDATE keyword does not
     r = run("pg-ro", "select updated_at from tickets;")
-    check("blocked patterns unchanged (substring match)", r.get("success") is False and "blockedByReadonly" in (r.get("error") or ""), r)
+    check("blocked patterns: an identifier containing UPDATE is not refused", r.get("success") is True, r)
+    r = run("pg-ro", "update tickets set note = 'x';")
+    check("blocked patterns: the UPDATE keyword is refused", r.get("success") is False and "blockedByReadonly" in (r.get("error") or ""), r)
     # cqlsh meta-commands do client-side file I/O as the daemon's uid: SOURCE would read any
     # path the child can open, /run/secrets included. The refusal happens before anything runs.
     r = run("cql-guard", "SOURCE '/run/secrets/pg_ro_password'")
