@@ -1,0 +1,9 @@
+{"name":"cass-prod","description":"Production Cassandra, read-only role. Replace REPLACE_CASSANDRA_RO_ROLE (twice: credentials and readonly_probe) and REPLACE_CASSANDRA_HOST. If that role may not LIST its own permissions, ask the Cassandra admin for a probe statement that fails for a writer and succeeds for a reader. SOURCE, COPY, CAPTURE and LOGIN are cqlsh meta-commands that read or write files as the daemon's own uid; they stay in blocked_patterns.","tags":["prod"],
+ "mode":"session","readonly":true,
+ "command":"cqlsh --credentials \"$CQLSH_CREDS\" --request-timeout={{statement_timeout}} REPLACE_CASSANDRA_HOST 9042",
+ "secrets":{"password":{"provider":"env","var":"CASS_PROD_PASSWORD"}},
+ "secret_files":{"CQLSH_CREDS":{"content":"[PlainTextAuthProvider]\nusername = REPLACE_CASSANDRA_RO_ROLE\npassword = {{password}}"}},
+ "statement_timeout":30,"reply_timeout":40,"row_cap":500,"query_limit":true,"max_sessions":3,
+ "readonly_probe":{"input":"LIST ALL PERMISSIONS OF REPLACE_CASSANDRA_RO_ROLE;","expect":"SELECT","reject":["MODIFY","ALTER","DROP","CREATE","AUTHORIZE"]},
+ "blocked_patterns":["DROP","DELETE","UPDATE","INSERT","ALTER","TRUNCATE","SOURCE","COPY","CAPTURE","LOGIN"],
+ "mcp":{"enabled":true,"tool_name":"cass_prod","tool_description":"Read-only CQL against production Cassandra"}}

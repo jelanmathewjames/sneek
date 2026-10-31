@@ -26,6 +26,25 @@ public struct CommandConfig: Codable, Equatable, Identifiable, Sendable {
 
     public var mcp: MCPConfig?
 
+    /// Reject input containing a literal backslash (guard against psql/mysql meta-commands). Per-call.
+    public var rejectBackslash: Bool?
+    /// Extra environment variables resolved from secrets and passed to the child process.
+    public var secretEnv: [String: String]?
+    /// Files materialized from secrets (e.g. a `.pgpass` file) before the session starts.
+    public var secretFiles: [String: SecretFileSpec]?
+    /// Statement timeout (seconds) applied at session setup.
+    public var statementTimeout: Int?
+    /// Per-call reply timeout (seconds).
+    public var replyTimeout: Int?
+    /// Caps rows returned per call; delivered via a setup command for mode == .session tools like mongosh.
+    public var rowCap: Int?
+    /// A probe run at session start to confirm the connection is actually read-only.
+    public var readonlyProbe: ReadonlyProbe?
+    /// Per-call cap on concurrent sessions for this command.
+    public var maxSessions: Int?
+    /// Whether a row cap should be enforced via query rewriting/setup rather than left to the client.
+    public var queryLimit: Bool?
+
     enum CodingKeys: String, CodingKey {
         case name, description, enabled, tags, mode
         case idleTimeout = "idle_timeout"
@@ -33,6 +52,15 @@ public struct CommandConfig: Codable, Equatable, Identifiable, Sendable {
         case setupCommands = "setup_commands"
         case blockedPatterns = "blocked_patterns"
         case sentinel, mcp
+        case rejectBackslash = "reject_backslash"
+        case secretEnv = "secret_env"
+        case secretFiles = "secret_files"
+        case statementTimeout = "statement_timeout"
+        case replyTimeout = "reply_timeout"
+        case rowCap = "row_cap"
+        case readonlyProbe = "readonly_probe"
+        case maxSessions = "max_sessions"
+        case queryLimit = "query_limit"
     }
 
     public init(
@@ -50,7 +78,16 @@ public struct CommandConfig: Codable, Equatable, Identifiable, Sendable {
         setupCommands: [String]? = nil,
         blockedPatterns: [String]? = nil,
         sentinel: String? = nil,
-        mcp: MCPConfig? = nil
+        mcp: MCPConfig? = nil,
+        rejectBackslash: Bool? = nil,
+        secretEnv: [String: String]? = nil,
+        secretFiles: [String: SecretFileSpec]? = nil,
+        statementTimeout: Int? = nil,
+        replyTimeout: Int? = nil,
+        rowCap: Int? = nil,
+        readonlyProbe: ReadonlyProbe? = nil,
+        maxSessions: Int? = nil,
+        queryLimit: Bool? = nil
     ) {
         self.name = name
         self.description = description
@@ -67,6 +104,62 @@ public struct CommandConfig: Codable, Equatable, Identifiable, Sendable {
         self.blockedPatterns = blockedPatterns
         self.sentinel = sentinel
         self.mcp = mcp
+        self.rejectBackslash = rejectBackslash
+        self.secretEnv = secretEnv
+        self.secretFiles = secretFiles
+        self.statementTimeout = statementTimeout
+        self.replyTimeout = replyTimeout
+        self.rowCap = rowCap
+        self.readonlyProbe = readonlyProbe
+        self.maxSessions = maxSessions
+        self.queryLimit = queryLimit
+    }
+}
+
+extension CommandConfig {
+    /// The GUI editor rebuilds a config from its form. This carries over every key the form has
+    /// no field for, so a save in the editor cannot drop a hand-edited setting.
+    public func keepingUneditedKeys(from original: CommandConfig) -> CommandConfig {
+        var merged = self
+        merged.idleTimeout = original.idleTimeout
+        merged.sentinel = original.sentinel
+        merged.rejectBackslash = original.rejectBackslash
+        merged.secretEnv = original.secretEnv
+        merged.secretFiles = original.secretFiles
+        merged.statementTimeout = original.statementTimeout
+        merged.replyTimeout = original.replyTimeout
+        merged.rowCap = original.rowCap
+        merged.readonlyProbe = original.readonlyProbe
+        merged.maxSessions = original.maxSessions
+        merged.queryLimit = original.queryLimit
+        return merged
+    }
+}
+
+// MARK: - Secret File Spec
+
+public struct SecretFileSpec: Codable, Equatable, Sendable {
+    public var content: String
+    public var escape: String?
+
+    public init(content: String, escape: String? = nil) {
+        self.content = content
+        self.escape = escape
+    }
+}
+
+// MARK: - Readonly Probe
+
+public struct ReadonlyProbe: Codable, Equatable, Sendable {
+    public var input: String
+    public var expect: String
+    /// Any of these strings appearing in the probe output refuses the command; checked before `expect`.
+    public var reject: [String]?
+
+    public init(input: String, expect: String, reject: [String]? = nil) {
+        self.input = input
+        self.expect = expect
+        self.reject = reject
     }
 }
 
@@ -195,15 +288,53 @@ public struct MCPConfig: Codable, Equatable, Sendable {
 public struct SneekConfig: Codable, Equatable, Sendable {
     public var scriptOutputDir: String?
     public var logLevel: String?
+    /// Where the daemon listens. Absent = `<config dir>/sneekd.sock`, as before.
+    public var socketPath: String?
+    /// Octal permissions for the socket file, e.g. `"0660"`. Absent = left to the umask, as before.
+    public var socketMode: String?
+    /// Serve only the safe subset of actions on the socket.
+    public var restrictSocket: Bool?
+    /// Scrub the child process environment before launching commands.
+    public var scrubChildEnv: Bool?
+    /// Reject input containing a literal backslash, daemon-wide default.
+    public var rejectBackslash: Bool?
+    /// Require the readonly probe to pass before allowing a command tagged prod to run.
+    public var requireReadonlyProd: Bool?
+    /// Path to an audit log file; absent = no audit logging.
+    public var auditLog: String?
 
     enum CodingKeys: String, CodingKey {
         case scriptOutputDir = "script_output_dir"
         case logLevel = "log_level"
+        case socketPath = "socket_path"
+        case socketMode = "socket_mode"
+        case restrictSocket = "restrict_socket"
+        case scrubChildEnv = "scrub_child_env"
+        case rejectBackslash = "reject_backslash"
+        case requireReadonlyProd = "require_readonly_prod"
+        case auditLog = "audit_log"
     }
 
-    public init(scriptOutputDir: String? = nil, logLevel: String? = nil) {
+    public init(
+        scriptOutputDir: String? = nil,
+        logLevel: String? = nil,
+        socketPath: String? = nil,
+        socketMode: String? = nil,
+        restrictSocket: Bool? = nil,
+        scrubChildEnv: Bool? = nil,
+        rejectBackslash: Bool? = nil,
+        requireReadonlyProd: Bool? = nil,
+        auditLog: String? = nil
+    ) {
         self.scriptOutputDir = scriptOutputDir
         self.logLevel = logLevel
+        self.socketPath = socketPath
+        self.socketMode = socketMode
+        self.restrictSocket = restrictSocket
+        self.scrubChildEnv = scrubChildEnv
+        self.rejectBackslash = rejectBackslash
+        self.requireReadonlyProd = requireReadonlyProd
+        self.auditLog = auditLog
     }
 }
 

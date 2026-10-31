@@ -1,0 +1,8 @@
+{"name":"pg-ro","description":"E2E read-only role","tags":["prod"],"mode":"session","readonly":true,
+ "command":"psql --csv --quiet -X -h db -p 5432 -U ro -d app",
+ "secrets":{"password":{"provider":"env","var":"PG_RO_PASSWORD"}},
+ "secret_files":{"PGPASSFILE":{"content":"db:5432:app:ro:{{password}}","escape":"pgpass"}},
+ "statement_timeout":2,"reply_timeout":6,"row_cap":50,"query_limit":true,"max_sessions":2,
+ "setup_commands":["SET default_transaction_read_only = on;"],
+ "blocked_patterns":["DROP","DELETE","UPDATE","INSERT","ALTER","TRUNCATE"],
+ "mcp":{"enabled":true,"tool_name":"pg_ro","tool_description":"E2E Postgres"}}

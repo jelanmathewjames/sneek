@@ -13,15 +13,14 @@ public protocol TunnelManagerProtocol: Sendable {
 
 enum TCPHealthCheck {
     static func check(port: Int, timeout: TimeInterval = 2.0) -> Bool {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        let sock = socket(AF_INET, Sys.sockStream, 0)
         guard sock >= 0 else { return false }
         defer { close(sock) }
 
         // Set send timeout so connect doesn't block forever
-        var tv = timeval(
-            tv_sec: Int(timeout),
-            tv_usec: Int32((timeout - Double(Int(timeout))) * 1_000_000)
-        )
+        var tv = timeval()
+        tv.tv_sec = Int(timeout)
+        tv.tv_usec = suseconds_t((timeout - Double(Int(timeout))) * 1_000_000)   // Int32 on Darwin, Int on Glibc
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         var addr = sockaddr_in()
@@ -31,7 +30,7 @@ enum TCPHealthCheck {
 
         let result = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Sys.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         return result == 0
@@ -80,8 +79,8 @@ public actor SSHTunnelManager: TunnelManagerProtocol {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        try? p.run()
-        p.waitUntilExit()
+        try? Sys.launch(p)
+        Sys.waitForExit(p)
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let pids = String(data: data, encoding: .utf8)?
             .split(separator: "\n")
@@ -247,7 +246,7 @@ public actor SSHTunnelManager: TunnelManagerProtocol {
         process.standardError = Pipe()
 
         do {
-            try process.run()
+            try Sys.launch(process)
         } catch {
             throw TunnelError.sshSpawnFailed(error.localizedDescription)
         }

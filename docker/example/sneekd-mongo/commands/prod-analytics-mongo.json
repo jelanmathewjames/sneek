@@ -1,0 +1,8 @@
+{"name":"prod-analytics-mongo","description":"Production analytics MongoDB, read-only user (replace every REPLACE_* placeholder)","tags":["prod"],
+ "mode":"session","readonly":true,
+ "command":"mongosh \"mongodb://REPLACE_MONGO_HOST:27017/REPLACE_ANALYTICS_DB\" --username REPLACE_MONGO_RO_USER --password \"$SNEEK_SECRET_PASSWORD\" --quiet",
+ "secrets":{"password":{"provider":"env","var":"MONGO_ANALYTICS_PASSWORD"}},
+ "secret_env":{"SNEEK_SECRET_PASSWORD":"{{password}}"},
+ "reply_timeout":40,"row_cap":500,"query_limit":true,"max_sessions":2,
+ "blocked_patterns":["insertOne","insertMany","updateOne","updateMany","deleteOne","deleteMany","replaceOne","findAndModify","bulkWrite","dropDatabase","dropIndex","createIndex","createCollection","renameCollection","drop("],
+ "mcp":{"enabled":true,"tool_name":"prod_analytics_mongo","tool_description":"Read-only queries against the production analytics MongoDB"}}

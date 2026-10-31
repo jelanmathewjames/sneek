@@ -34,8 +34,8 @@ private func runProcess(_ executable: String, _ arguments: [String]) async throw
     process.standardOutput = stdout
     process.standardError = stderr
 
-    try process.run()
-    process.waitUntilExit()
+    try Sys.launch(process)
+    Sys.waitForExit(process)
 
     let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
     let stderrString = String(data: stderrData, encoding: .utf8) ?? ""
@@ -61,8 +61,8 @@ private func findExecutable(_ name: String, fallback: String) -> String {
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = FileHandle.nullDevice
-    try? p.run()
-    p.waitUntilExit()
+    try? Sys.launch(p)
+    Sys.waitForExit(p)
     if p.terminationStatus == 0 {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

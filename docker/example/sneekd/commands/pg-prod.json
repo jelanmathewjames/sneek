@@ -1,0 +1,9 @@
+{"name":"pg-prod","description":"Production Postgres, read-only role (replace every REPLACE_* placeholder)","tags":["prod"],
+ "mode":"session","readonly":true,
+ "command":"psql --csv --quiet -X -h REPLACE_PG_HOST -p 5432 -U REPLACE_PG_RO_USER -d REPLACE_PG_DATABASE",
+ "secrets":{"password":{"provider":"env","var":"PG_PROD_PASSWORD"}},
+ "secret_files":{"PGPASSFILE":{"content":"REPLACE_PG_HOST:5432:REPLACE_PG_DATABASE:REPLACE_PG_RO_USER:{{password}}","escape":"pgpass"}},
+ "statement_timeout":30,"reply_timeout":40,"row_cap":500,"query_limit":true,"max_sessions":3,
+ "setup_commands":["SET default_transaction_read_only = on;"],
+ "blocked_patterns":["DROP","DELETE","UPDATE","INSERT","ALTER","TRUNCATE"],
+ "mcp":{"enabled":true,"tool_name":"pg_prod","tool_description":"Read-only SQL against production Postgres"}}

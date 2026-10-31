@@ -1,0 +1,6 @@
+.build
+.git
+.swiftpm
+docs
+Tests/e2e
+*.md

@@ -198,9 +198,11 @@ struct CommandFormView: View {
     @State private var showDeleteConfirm: Bool = false
 
     private let originalName: String
+    private let original: CommandConfig
 
     init(command: CommandConfig) {
         self.originalName = command.name
+        self.original = command
         _name = State(initialValue: command.name)
         _description = State(initialValue: command.description)
         _enabled = State(initialValue: command.enabled ?? true)
@@ -491,7 +493,7 @@ struct CommandFormView: View {
             appState.delete(originalName)
         }
 
-        appState.save(cmd)
+        appState.save(cmd.keepingUneditedKeys(from: original))
         appState.selectedCommand = name
 
         justSaved = true

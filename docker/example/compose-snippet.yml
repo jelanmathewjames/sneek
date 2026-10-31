@@ -1,0 +1,130 @@
+# Example server deployment: TWO sneekd daemons from the SAME image, one per trust group.
+#
+# Everything here is a placeholder. There are no secrets in this directory and every host
+# is a REPLACE_* placeholder; replace the REPLACE_* names, the hosts and the image digest
+# before this goes anywhere near a real database.
+#
+# Why two daemons: mongosh is a full JavaScript/Node shell, so
+# input to a Mongo command can execute programs and read files inside its container. Giving
+# the Mongo commands their own daemon means that container holds only Mongo secrets — a
+# mongosh payload can read no credential other than its own read-only user's. The Postgres
+# and Cassandra clients (psql with backslash commands rejected, cqlsh) stay together in
+# `sneekd`.
+#
+# The client connects to both sockets
+# (`SNEEK_SOCKETS=/run/sneek/sneekd.sock,/run/sneek-mongo/sneekd.sock`);
+# tool names must be unique across daemons.
+#
+# What that isolation is, precisely: the commands inside ONE daemon share a uid. Every child
+# can read every file in that container's /run/secrets for the container's lifetime; mongosh's
+# `--password "$VAR"` is on argv, and /proc/<pid>/cmdline is world-readable (PR_SET_DUMPABLE
+# covers the daemon's memory, not a child's command line); sibling children are dumpable to
+# each other. The container is the boundary — one daemon per credential is what makes the
+# claim above literally true.
+#
+# `docker compose config` fails until the image digest placeholder below is filled in —
+# that is the placeholder, not a compose problem. Likewise, until the Cassandra probe in
+# sneekd/commands/cass-prod.json is configured, `sneekd` reports UNHEALTHY: health.tsv runs
+# cass-prod, and the prod read-only check refuses it. Not a VPN problem.
+#
+# hidepid is NOT a compose option: compose cannot remount /proc inside a container, so
+# `hidepid=2` is host-level hardening — `mount -o remount,hidepid=2 /proc` on the VM, or
+# `ProtectProc=invisible` on the systemd unit that runs this compose project. Inside the
+# container the protection that holds is PR_SET_DUMPABLE, which the daemon applies
+# to itself at start-up.
+#
+# SNEEK_LOG_STDERR=1 and SNEEK_SERVER=1 come from the image; SNEEK_SERVER=1 makes the
+# entrypoint refuse to start unless config.json has both `restrict_socket: true` and
+# `require_readonly_prod: true`.
+
+x-sneekd-common: &sneekd-common
+  # Pin by digest, not by tag: `docker buildx imagetools inspect sneekd:server-YYYYMMDD`
+  # prints the digest to paste here. The server is x86_64, so build with
+  # `--platform linux/amd64`.
+  image: sneekd@sha256:REPLACE_WITH_THE_BUILT_IMAGE_DIGEST
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: unless-stopped
+  # mongosh and cqlsh run code as uid 2001 inside this container: a payload that forks or
+  # allocates without limit must hit these bounds, not the host's. 128 pids covers
+  # max_sessions worth of clients plus bash wrappers with room to spare; 512m is well above
+  # the daemon plus a few mongosh processes.
+  pids_limit: 128
+  mem_limit: 512m
+  # Writable scratch only, each with a size so a runaway child cannot fill the host's RAM
+  # through tmpfs. /var/lib/sneek is the daemon's home (the passwd entry, which is what
+  # corelibs Foundation actually reads); /tmp holds the per-session sneek-secrets-*
+  # directories, which are wiped whenever the container restarts.
+  tmpfs:
+    - "/var/lib/sneek:uid=2001,gid=2001,mode=0700,size=64m"
+    - "/tmp:uid=2001,gid=2001,mode=0700,size=32m"
+  # No ports: the only way in is the Unix socket on the shared volume.
+  # No environment: secrets — they arrive as files in /run/secrets and the entrypoint
+  # turns each file into one variable named after it (pg_prod_password → PG_PROD_PASSWORD).
+  network_mode: "service:wireguard"
+  depends_on:
+    wireguard:
+      condition: service_healthy
+      restart: true
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+  sneekd:
+    <<: *sneekd-common
+    volumes:
+      - "./sneekd:/etc/sneek:ro"
+      - "sneek-sock:/run/sneek"
+      - "sneek-audit:/var/lib/sneek-audit"
+    secrets: [pg_prod_password, cass_prod_password]
+
+  sneekd-mongo:
+    <<: *sneekd-common
+    volumes:
+      - "./sneekd-mongo:/etc/sneek:ro"
+      - "sneek-mongo-sock:/run/sneek"
+      - "sneek-mongo-audit:/var/lib/sneek-audit"
+    secrets: [mongo_app_password, mongo_analytics_password]
+
+  # Placeholder for the VPN sidecar both daemons share a network namespace with.
+  # It owns the only route to the database network; neither daemon has an interface of its own.
+  wireguard:
+    image: REPLACE_WITH_THE_WIREGUARD_IMAGE
+    cap_add: [NET_ADMIN]
+    healthcheck:
+      test: ["CMD-SHELL", "REPLACE_WITH_A_TUNNEL_LIVENESS_CHECK"]
+      interval: 10s
+      retries: 6
+
+# Secrets are files, never environment variables in this file: `docker compose config`
+# and `docker inspect` both print environment, and a value in the daemon's own environment
+# would be inherited by every child it spawns (scrub_child_env removes it, but a file that
+# was never in the environment is the stronger property).
+secrets:
+  pg_prod_password:    {file: /etc/sneek-secrets/pg_prod_password}
+  cass_prod_password:  {file: /etc/sneek-secrets/cass_prod_password}
+  mongo_app_password:  {file: /etc/sneek-secrets/mongo_app_password}
+  mongo_analytics_password: {file: /etc/sneek-secrets/mongo_analytics_password}
+
+volumes:
+  # Each daemon gets its own socket volume; the client mounts sneek-sock at /run/sneek and
+  # sneek-mongo-sock at /run/sneek-mongo, and joins group 2100 (sneeksock) to reach them.
+  sneek-sock: {}
+  sneek-mongo-sock: {}
+  # Named volumes so the audit log survives container recreation. The daemon holds the file
+  # open with O_APPEND, so rotate it on the host with `logrotate` + `copytruncate`.
+  # They mount over /var/lib/sneek-audit, which the image creates owned by uid 2001, so a
+  # fresh named volume inherits that ownership — no manual chown. (If the daemon still
+  # exits with "cannot open audit log", the volume was created some other way; by design a
+  # server that cannot audit does not serve.)
+  # The file is 0600, which keeps other uids out but not the daemon's own children: a
+  # mongosh payload runs as the same uid and could append to or truncate it. If that matters,
+  # set `audit_log: "-"` (stderr → this json-file log; children cannot reach the daemon's
+  # fd 2) or `chattr +a` the file on the host (append-only — which breaks copytruncate).
+  sneek-audit: {}
+  sneek-mongo-audit: {}

@@ -108,4 +108,35 @@ func runSessionManagerTests() {
         }
         check(names.isEmpty, "starts empty")
     }
+
+    test("Send to a session whose process died restarts it") {
+        signal(SIGPIPE, SIG_IGN)   // same as Start.run(); the test binary needs it too
+        let out: String = try runBlocking {
+            let manager = SessionManager()
+            let config = CommandConfig(name: "dies", description: "t", mode: .session,
+                                       command: "exec bash --norc --noprofile", sentinel: "echo __SNEEK_DONE__")
+            let cmd = "exec bash --norc --noprofile"
+            _ = try await manager.send(input: "echo first", to: "dies", config: config, resolvedCommand: cmd)
+            _ = try? await manager.send(input: "kill -9 $$", to: "dies", config: config, resolvedCommand: cmd)
+            let again = try await manager.send(input: "echo second", to: "dies", config: config, resolvedCommand: cmd)
+            await manager.reapAll()
+            return again
+        }
+        check(out == "second", "got: \(out)")
+    }
+
+    test("A child that exits mid-request yields an error, not a hang") {
+        signal(SIGPIPE, SIG_IGN)
+        var threw = false
+        do {
+            let _: String = try runBlocking {
+                let manager = SessionManager()
+                let config = CommandConfig(name: "exits", description: "t", mode: .session,
+                                           command: "exec bash --norc --noprofile", sentinel: "echo __SNEEK_DONE__")
+                return try await manager.send(input: "exit 3", to: "exits", config: config,
+                                              resolvedCommand: "exec bash --norc --noprofile")
+            }
+        } catch { threw = true }
+        check(threw, "EOF before the sentinel must throw")
+    }
 }

@@ -1,0 +1,6 @@
+{"name":"pg-app","description":"E2E app role","tags":["prod"],"mode":"session","readonly":true,
+ "command":"psql --csv --quiet -X postgresql://app:{{password}}@db:5432/app",
+ "secrets":{"password":{"provider":"env","var":"PG_APP_PASSWORD"}},
+ "setup_commands":["SET default_transaction_read_only = on;"],
+ "blocked_patterns":["DROP","DELETE","UPDATE","INSERT","ALTER","TRUNCATE"],
+ "mcp":{"enabled":true,"tool_name":"pg_app","tool_description":"E2E Postgres"}}

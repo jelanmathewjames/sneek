@@ -1,0 +1,4 @@
+{"name":"cql-guard","description":"E2E cqlsh meta-command guard (the refusal happens before anything runs)","tags":["dev"],"mode":"session","readonly":true,
+ "command":"exec cat","sentinel":"__SNEEK_DONE__",
+ "blocked_patterns":["DROP","DELETE","UPDATE","INSERT","ALTER","TRUNCATE","SOURCE","COPY","CAPTURE","LOGIN"],
+ "mcp":{"enabled":true,"tool_name":"cql_guard","tool_description":"E2E cqlsh guard"}}

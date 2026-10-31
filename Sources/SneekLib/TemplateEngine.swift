@@ -5,7 +5,10 @@ public enum TemplateError: Error, Equatable {
 }
 
 public enum TemplateEngine {
-    public static func render(_ template: String, variables: [String: String]) throws -> String {
+    /// `transform` is applied to each substituted *value* only — never to the literal
+    /// text around it, so a file format's separators stay separators (see `pgpass`).
+    public static func render(_ template: String, variables: [String: String],
+                              transform: ((String) -> String)? = nil) throws -> String {
         var result = ""
         var i = template.startIndex
 
@@ -28,7 +31,7 @@ public enum TemplateEngine {
                 guard let value = variables[name] else {
                     throw TemplateError.unresolvedPlaceholder(name)
                 }
-                result.append(value)
+                result.append(transform?(value) ?? value)
                 i = closeRange.upperBound
             } else {
                 result.append(template[i])

@@ -1,0 +1,2 @@
+prod-app-mongo	db.runCommand({ping:1}).ok
+prod-analytics-mongo	db.runCommand({ping:1}).ok

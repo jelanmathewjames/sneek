@@ -1,0 +1,3 @@
+{"socket_path":"/run/sneek/sneekd.sock","socket_mode":"0660","restrict_socket":true,
+ "scrub_child_env":true,"reject_backslash":true,"require_readonly_prod":true,
+ "audit_log":"/var/lib/sneek-audit/audit.jsonl"}

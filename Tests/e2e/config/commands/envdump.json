@@ -1,0 +1,5 @@
+{"name":"envdump","description":"E2E env canary","tags":["dev"],"mode":"session",
+ "command":"exec bash --norc --noprofile","sentinel":"echo __SNEEK_DONE__","reject_backslash":false,
+ "secrets":{"own":{"provider":"env","var":"ENVDUMP_SECRET"}},
+ "secret_env":{"SNEEK_SECRET_OWN":"{{own}}"},
+ "mcp":{"enabled":true,"tool_name":"envdump","tool_description":"E2E env"}}

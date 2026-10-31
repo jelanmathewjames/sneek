@@ -1,0 +1,40 @@
+# Throwaway: no real data, no real credentials, no network beyond this project.
+name: sneek-e2e
+services:
+  db:
+    image: postgres:17
+    environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: app_pw, POSTGRES_DB: app}
+    volumes: ["./init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U app -d app"], interval: 2s, retries: 30}
+  sneekd:
+    build: {context: ../.., dockerfile: docker/Dockerfile}
+    image: sneekd:dev
+    depends_on: {db: {condition: service_healthy}}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    tmpfs: ["/var/lib/sneek:uid=2001,gid=2001,mode=0700", "/tmp:uid=2001,gid=2001,mode=0700"]
+    volumes: ["./config:/etc/sneek:ro", "./secrets:/run/secrets:ro", "sneek-sock:/run/sneek"]
+    # The image's HEALTHCHECK interval (60s) is tuned for a long-lived server; the suite
+    # only needs to know when the daemon is first answering, so poll faster here.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 3s
+      timeout: 90s
+      start_period: 5s
+      retries: 20
+  client:            # stands in for the client service: different uid, member of the socket group
+    image: python:3.12-slim
+    user: "1001:1001"
+    group_add: ["2100"]
+    depends_on: {sneekd: {condition: service_healthy}}
+    volumes: ["./probes.py:/probes.py:ro", "sneek-sock:/run/sneek"]
+    command: ["python", "/probes.py", "member"]
+  outsider:          # same uid, NOT in the group
+    image: python:3.12-slim
+    user: "1001:1001"
+    depends_on: {sneekd: {condition: service_healthy}}
+    volumes: ["./probes.py:/probes.py:ro", "sneek-sock:/run/sneek"]
+    command: ["python", "/probes.py", "outsider"]
+volumes: {sneek-sock: {}}

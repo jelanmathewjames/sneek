@@ -67,6 +67,35 @@ func runConfigStoreTests() {
         check(!FileManager.default.fileExists(atPath: file.path), "file removed")
     }
 
+    test("reload: a malformed command file is skipped with a warning; the good one stays loaded") {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sneek-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = try ConfigStore(baseDir: tempDir)
+        try store.save(CommandConfig(name: "good", description: "x", mode: .oneshot, command: "echo"))
+        try Data("{\"name\": \"bad\", \"mode\": \"oneshot\"".utf8).write(to: tempDir.appendingPathComponent("commands/bad.json"))
+
+        // Capture stderr: the skip must be visible in the daemon log, not silent.
+        let pipe = Pipe()
+        let saved = dup(STDERR_FILENO)
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+        var reloadError: Error?
+        do { try store.reload() } catch { reloadError = error }
+        dup2(saved, STDERR_FILENO)
+        close(saved)
+        pipe.fileHandleForWriting.closeFile()
+        let err = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+
+        check(reloadError == nil, "reload must not throw for one bad file: \(String(describing: reloadError))")
+        check(store.commands.count == 1 && store.commands["good"] != nil, "\(store.commands.keys.sorted())")
+        check(err.contains("[WARN]") && err.contains("bad.json"), err)
+
+        // A fresh store over the same directory behaves the same way at start-up.
+        let store2 = try ConfigStore(baseDir: tempDir)
+        check(store2.commands.count == 1 && store2.commands["good"] != nil, "\(store2.commands.keys.sorted())")
+    }
+
     test("Global config save and load") {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sneek-test-\(UUID().uuidString)")

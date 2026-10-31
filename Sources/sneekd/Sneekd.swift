@@ -7,20 +7,19 @@ struct Sneekd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sneekd",
         abstract: "Sneek daemon — manage tunnels, secrets, and commands",
-        subcommands: [
-            Start.self,
-            Stop.self,
-            Status.self,
-            Run.self,
-            Tunnel.self,
-            List.self,
-            MCPServe.self,
-            GenerateScripts.self,
-            InstallMCP.self,
-            Install.self,
-            Uninstall.self,
-        ]
+        subcommands: platformSubcommands
     )
+
+    private static var platformSubcommands: [ParsableCommand.Type] {
+        var cmds: [ParsableCommand.Type] = [
+            Start.self, Stop.self, Status.self, Run.self, Tunnel.self,
+            List.self, MCPServe.self, GenerateScripts.self, InstallMCP.self,
+        ]
+        #if os(macOS)
+        cmds += [Install.self, Uninstall.self]   // launchd; servers run `sneekd start` from an entrypoint or unit
+        #endif
+        return cmds
+    }
 }
 
 // MARK: - Helpers
@@ -30,8 +29,32 @@ func defaultConfigDir() -> URL {
     return home.appendingPathComponent(".config/sneek")
 }
 
-func defaultSocketPath() -> String {
-    defaultConfigDir().appendingPathComponent("sneekd.sock").path
+/// Config-directory selection, shared by every subcommand that touches one.
+struct GlobalOptions: ParsableArguments {
+    @Option(name: .long, help: "Config directory (default: ~/.config/sneek, or $SNEEK_CONFIG_DIR)")
+    var configDir: String?
+
+    @Option(name: .customLong("socket-path"), help: "Unix socket path (default: <config dir>/sneekd.sock, or socket_path in config.json)")
+    var socketPathOption: String?
+
+    var baseDir: URL {
+        if let configDir { return URL(fileURLWithPath: NSString(string: configDir).expandingTildeInPath) }
+        if let env = ProcessInfo.processInfo.environment["SNEEK_CONFIG_DIR"], !env.isEmpty { return URL(fileURLWithPath: env) }
+        return defaultConfigDir()
+    }
+
+    /// Where the daemon for this config directory listens. Reads config.json
+    /// directly (never via `ConfigStore`, which would create `<baseDir>/commands/`
+    /// as a side effect) so resolving a client socket path never touches disk.
+    func socketPath(explicit: String? = nil) -> String {
+        Daemon.resolveClientSocketPath(baseDir: baseDir, explicit: explicit ?? socketPathOption)
+    }
+}
+
+/// Glibc's `stderr` is a mutable global Swift 6 refuses to read from a concurrent
+/// context; `FileHandle.standardError` is the same unbuffered fd 2 on both platforms.
+func printError(_ message: String) {
+    FileHandle.standardError.write(Data("error: \(message)\n".utf8))
 }
 
 // MARK: - Start
@@ -39,14 +62,22 @@ func defaultSocketPath() -> String {
 struct Start: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Start the daemon")
 
+    @OptionGroup var global: GlobalOptions
+
+    @Flag(name: .long, help: "Serve only run, tools and status on the socket")
+    var restrictSocket = false
+
     func run() async throws {
+        // Before anything is logged: in a container every level goes to stderr.
+        SneekLogger.stderrAllLevels = SneekLogger.stderrAllLevelsFromEnvironment(ProcessInfo.processInfo.environment)
+
         // Write PID file
-        let pidPath = defaultConfigDir().appendingPathComponent("sneekd.pid")
+        let pidPath = global.baseDir.appendingPathComponent("sneekd.pid")
         try String(ProcessInfo.processInfo.processIdentifier).write(to: pidPath, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: pidPath) }
 
-        let configStore = try ConfigStore(baseDir: defaultConfigDir())
-        let daemon = Daemon(configStore: configStore)
+        let configStore = try ConfigStore(baseDir: global.baseDir)
+        let daemon = Daemon(configStore: configStore, socketPath: global.socketPathOption, restrictSocket: restrictSocket ? true : nil)
 
         // Ignore SIGPIPE: writes to a broken pipe (e.g. a dead session's stdin
         // after its ssh tunnel reconnected) should return EPIPE, not kill the daemon.
@@ -80,8 +111,10 @@ struct Start: AsyncParsableCommand {
 struct Stop: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Stop the daemon")
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
-        let client = IPCClient(socketPath: defaultSocketPath())
+        let client = IPCClient(socketPath: global.socketPath())
         let response = try client.send(IPCRequest(action: .shutdown))
         print(response.output ?? response.error ?? "stopped")
     }
@@ -92,8 +125,10 @@ struct Stop: ParsableCommand {
 struct Status: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Show daemon status")
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
-        let client = IPCClient(socketPath: defaultSocketPath())
+        let client = IPCClient(socketPath: global.socketPath())
         let response = try client.send(IPCRequest(action: .status))
         if response.success {
             print(response.output ?? "ok")
@@ -107,18 +142,19 @@ struct Status: ParsableCommand {
 
 struct Run: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run a command")
+    @OptionGroup var global: GlobalOptions
     @Argument(help: "Command name") var name: String
     @Argument(help: "Input to send") var input: String?
 
     func run() throws {
-        let client = IPCClient(socketPath: defaultSocketPath())
+        let client = IPCClient(socketPath: global.socketPath())
         let response = try client.send(IPCRequest(action: .run, command: name, input: input))
         if response.success {
             if let output = response.output {
                 print(output)
             }
         } else {
-            fputs("error: \(response.error ?? "unknown")\n", stderr)
+            printError(response.error ?? "unknown")
             throw ExitCode.failure
         }
     }
@@ -128,16 +164,17 @@ struct Run: ParsableCommand {
 
 struct Tunnel: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Manage tunnels")
+    @OptionGroup var global: GlobalOptions
     @Argument(help: "Command name") var name: String
     @Argument(help: "Operation: up, down, status") var operation: String
 
     func run() throws {
-        let client = IPCClient(socketPath: defaultSocketPath())
+        let client = IPCClient(socketPath: global.socketPath())
         let response = try client.send(IPCRequest(action: .tunnel, command: name, operation: operation))
         if response.success {
             print(response.output ?? "ok")
         } else {
-            fputs("error: \(response.error ?? "unknown")\n", stderr)
+            printError(response.error ?? "unknown")
             throw ExitCode.failure
         }
     }
@@ -148,8 +185,10 @@ struct Tunnel: ParsableCommand {
 struct List: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "List all commands")
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
-        let configStore = try ConfigStore(baseDir: defaultConfigDir())
+        let configStore = try ConfigStore(baseDir: global.baseDir)
         for (name, cmd) in configStore.commands.sorted(by: { $0.key < $1.key }) {
             var flags: [String] = []
             if cmd.enabled == false { flags.append("disabled") }
@@ -169,11 +208,12 @@ struct MCPServe: AsyncParsableCommand {
         commandName: "mcp-serve",
         abstract: "Run as MCP server (stdio)"
     )
+    @OptionGroup var global: GlobalOptions
     @Option(help: "Filter by tags (comma-separated)") var tags: String?
     @Option(help: "Filter by command names (comma-separated)") var commands: String?
 
     func run() async throws {
-        let configStore = try ConfigStore(baseDir: defaultConfigDir())
+        let configStore = try ConfigStore(baseDir: global.baseDir)
         let sessionManager = SessionManager()
         let tunnelManager = SSHTunnelManager()
 
@@ -186,7 +226,7 @@ struct MCPServe: AsyncParsableCommand {
             tunnelManager: tunnelManager,
             tags: tagList,
             commands: cmdList,
-            ipcSocketPath: defaultSocketPath()
+            ipcSocketPath: global.socketPath()
         )
         try await server.run()
     }
@@ -199,10 +239,11 @@ struct GenerateScripts: ParsableCommand {
         commandName: "generate-scripts",
         abstract: "Generate shell scripts for all commands"
     )
+    @OptionGroup var global: GlobalOptions
     @Option(help: "Output directory") var outputDir: String?
 
     func run() throws {
-        let configStore = try ConfigStore(baseDir: defaultConfigDir())
+        let configStore = try ConfigStore(baseDir: global.baseDir)
         let dir = outputDir ?? configStore.globalConfig.scriptOutputDir ?? "~/bin"
         let expanded = NSString(string: dir).expandingTildeInPath
         let paths = try ScriptGenerator.generateAll(configStore: configStore, outputDir: expanded)
@@ -228,6 +269,8 @@ struct InstallMCP: ParsableCommand {
         print("sneek MCP server added to \(settingsPath)")
     }
 }
+
+#if os(macOS)
 
 // MARK: - Install (launchd)
 
@@ -293,3 +336,5 @@ struct Uninstall: ParsableCommand {
         }
     }
 }
+
+#endif

@@ -11,7 +11,9 @@ public final class ConfigStore: @unchecked Sendable {
         return e
     }()
 
+    #if canImport(Darwin)
     private var dispatchSource: DispatchSourceFileSystemObject?
+    #endif
 
     public private(set) var commands: [String: CommandConfig] = [:]
     public private(set) var globalConfig: SneekConfig = SneekConfig()
@@ -25,12 +27,16 @@ public final class ConfigStore: @unchecked Sendable {
         try reload()
     }
 
+    /// Decodes into locals and swaps them in only at the end, so a failure part-way leaves the
+    /// previous state in place rather than an empty command table. A command file that does not
+    /// decode is skipped with a warning — one malformed file must not empty the daemon.
+    /// A malformed `config.json` still throws: its settings gate what the daemon may serve.
     public func reload() throws {
-        commands = [:]
+        var global = SneekConfig()
         let configPath = baseDir.appendingPathComponent("config.json")
         if FileManager.default.fileExists(atPath: configPath.path) {
             let data = try Data(contentsOf: configPath)
-            globalConfig = try decoder.decode(SneekConfig.self, from: data)
+            global = try decoder.decode(SneekConfig.self, from: data)
         }
 
         let files = try FileManager.default.contentsOfDirectory(
@@ -38,11 +44,17 @@ public final class ConfigStore: @unchecked Sendable {
             includingPropertiesForKeys: nil
         ).filter { $0.pathExtension == "json" }
 
+        var loaded: [String: CommandConfig] = [:]
         for file in files {
-            let data = try Data(contentsOf: file)
-            let config = try decoder.decode(CommandConfig.self, from: data)
-            commands[config.name] = config
+            do {
+                let config = try decoder.decode(CommandConfig.self, from: try Data(contentsOf: file))
+                loaded[config.name] = config
+            } catch {
+                SneekLogger.warn("config: skipping \(file.lastPathComponent): \(error)")
+            }
         }
+        globalConfig = global
+        commands = loaded
     }
 
     public func save(_ command: CommandConfig) throws {
@@ -69,6 +81,8 @@ public final class ConfigStore: @unchecked Sendable {
     private var lastCommandsHash: Int = 0
 
     public func startWatching() {
+        // Directory events are a Darwin-only fast path; the 3-second poll below covers every platform.
+        #if canImport(Darwin)
         // DispatchSource for directory-level changes (file add/remove)
         let fd = open(commandsDir.path, O_EVTONLY)
         if fd >= 0 {
@@ -84,6 +98,7 @@ public final class ConfigStore: @unchecked Sendable {
             source.resume()
             dispatchSource = source
         }
+        #endif
 
         // Poll every 3 seconds for content changes (edits to existing files)
         lastCommandsHash = computeHash()
@@ -97,10 +112,14 @@ public final class ConfigStore: @unchecked Sendable {
     }
 
     public func stopWatching() {
+        #if canImport(Darwin)
         dispatchSource?.cancel()
+        #endif
         pollTimer?.cancel()
         pollTimer = nil
+        #if canImport(Darwin)
         dispatchSource = nil
+        #endif
     }
 
     private func checkAndReload() {

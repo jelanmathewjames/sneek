@@ -33,8 +33,8 @@ private func shell(_ cmd: String) -> (Int32, String) {
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = pipe
-    try? p.run()
-    p.waitUntilExit()
+    try? Sys.launch(p)
+    Sys.waitForExit(p)
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     return (p.terminationStatus, String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
 }
@@ -78,6 +78,10 @@ func runIntegrationTests() {
     // ── 1. Real Keychain: store, resolve, clean up ──
 
     test("Keychain: store and retrieve a real secret") {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/security") else {
+            print("    (skipped — no macOS Keychain on this platform)")
+            return
+        }
         keychainDelete() // clean slate
         let added = keychainAdd()
         check(added, "keychain add should succeed")
@@ -213,6 +217,10 @@ func runIntegrationTests() {
     // ── 5. Full pipeline: Keychain secret → template → session execute ──
 
     test("Full pipeline: keychain secret → template interpolation → session execution") {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/security") else {
+            print("    (skipped — no macOS Keychain on this platform)")
+            return
+        }
         keychainDelete()
         let added = keychainAdd()
         check(added, "keychain add")

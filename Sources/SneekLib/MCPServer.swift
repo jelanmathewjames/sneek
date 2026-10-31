@@ -82,42 +82,19 @@ public final class MCPServer: @unchecked Sendable {
     // MARK: - Tool List
 
     func buildToolList() -> [[String: Any]] {
-        var tools: [[String: Any]] = []
-
-        for (_, cmd) in configStore.commands {
-            if cmd.enabled == false { continue }
-            guard let mcp = cmd.mcp, mcp.enabled else { continue }
-
-            // Apply filters
-            if let tagFilter {
-                let cmdTags = Set(cmd.tags ?? [])
-                if tagFilter.isDisjoint(with: cmdTags) { continue }
-            }
-            if let commandFilter, !commandFilter.contains(cmd.name) { continue }
-
-            var description = mcp.toolDescription
-            if cmd.readonly == true {
-                description += " [read-only]"
-            }
-
-            let tool: [String: Any] = [
-                "name": "sneek_\(mcp.toolName)",
-                "description": description,
+        ToolCatalog.enabledTools(in: configStore.commands, tags: tagFilter, commands: commandFilter).map { tool in
+            [
+                "name": tool.name,
+                "description": tool.description,
                 "inputSchema": [
                     "type": "object",
                     "properties": [
-                        "input": [
-                            "type": "string",
-                            "description": "The input to send to the command",
-                        ] as [String: Any],
+                        "input": ["type": "string", "description": "The input to send to the command"] as [String: Any],
                     ] as [String: Any],
                     "required": ["input"],
                 ] as [String: Any],
             ]
-            tools.append(tool)
         }
-
-        return tools
     }
 
     // MARK: - Tool Call
@@ -168,13 +145,19 @@ public final class MCPServer: @unchecked Sendable {
     }
 
     private func handleToolCallDirect(id: Any?, cmd: CommandConfig, input: String) async -> [String: Any] {
+        // Only values from a `secrets` entry; plain `variables` are configuration.
+        var secretValues: [String] = []
         do {
-            let resolver = SecretResolver(
-                secrets: cmd.secrets ?? [:],
-                variables: cmd.variables ?? [:]
-            )
-            let resolved = try await resolver.resolveAll()
-            let renderedCommand = try TemplateEngine.render(cmd.command, variables: resolved)
+            if let refusal = InputGuard.check(input: input, config: cmd, global: configStore.globalConfig) {
+                throw refusal
+            }
+            // The same preflight as the daemon. A failed stage is reported as its underlying
+            // error (a template error, a Refusal…), redacted for whatever was resolved by then.
+            let prepared: RunPipeline.Prepared
+            do { prepared = try await RunPipeline.prepare(config: cmd, store: configStore) }
+            catch let f as RunPipeline.Failure { secretValues = f.redact; throw f.underlying }
+            secretValues = prepared.redact
+            let renderedCommand = prepared.command, launch = prepared.launch
 
             if let tunnel = cmd.tunnel {
                 try await tunnelManager.ensureUp(cmd.name, tunnel: tunnel)
@@ -184,20 +167,29 @@ public final class MCPServer: @unchecked Sendable {
             switch cmd.mode {
             case .session:
                 output = try await sessionManager.send(
-                    input: input, to: cmd.name, config: cmd, resolvedCommand: renderedCommand
+                    input: RunPipeline.sessionInput(input, config: cmd), to: cmd.name, config: cmd,
+                    resolvedCommand: renderedCommand, launch: launch
                 )
             case .oneshot:
                 output = try await sessionManager.runOneshot(
-                    command: renderedCommand, input: input.isEmpty ? nil : input
+                    command: renderedCommand, input: input.isEmpty ? nil : input, launch: launch, rowCap: cmd.rowCap
                 )
             }
 
             return makeResult(id: id, result: [
-                "content": [["type": "text", "text": output]],
+                "content": [["type": "text", "text": Redaction.apply(output, secrets: secretValues)]],
+            ])
+        } catch SessionError.timedOut(let seconds) {
+            // The same text the daemon puts on the socket, so an MCP caller gets the structured
+            // reason rather than a generic error. (The daemon's `code: "timeout"` has no place in
+            // the MCP tool result, which carries only text and `isError`.)
+            return makeResult(id: id, result: [
+                "content": [["type": "text", "text": "timed out after \(seconds)s waiting for '\(cmd.name)'; session restarted"]],
+                "isError": true,
             ])
         } catch {
             return makeResult(id: id, result: [
-                "content": [["type": "text", "text": "Error: \(error)"]],
+                "content": [["type": "text", "text": Redaction.apply("Error: \(error)", secrets: secretValues)]],
                 "isError": true,
             ])
         }
@@ -236,6 +228,6 @@ public final class MCPServer: @unchecked Sendable {
         // Ensure single line (strip any embedded newlines from JSON)
         line = line.replacingOccurrences(of: "\n", with: "")
         print(line)
-        fflush(stdout)
+        Sys.flushStdout()
     }
 }
